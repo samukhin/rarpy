@@ -47,7 +47,7 @@ MIT License. Проект распространяется свободно, б�
 """
 
 # Настройка логирования для обработки ошибок
-logging.basicConfig(level=logging.ERROR, format="%(levelname)s: %(message)s")
+logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
 
 
 class RarError(Exception):
@@ -225,6 +225,11 @@ def encode_vint(value: int) -> bytes:
     Кодирует целое число в vint (variable length integer) по RAR 5.0 спецификации.
     Vint использует 7 бит на байт для данных, старший бит - флаг продолжения.
     Максимум 10 байт для 64-битных чисел.
+
+    Пример:
+        >>> encode_vint(300)
+        b'\\xac\\x02'
+
     Возвращает байты vint.
     """
     result = []
@@ -256,9 +261,15 @@ def get_files_and_dirs(paths: list[pathlib.Path]) -> list[pathlib.Path]:
     Возвращает отсортированный список pathlib.Path объектов.
     """
     result: list[pathlib.Path] = []
+    base = pathlib.Path.cwd()
     for p in paths:
         try:
-            p = p.resolve()  # Получаем абсолютный путь для корректности
+            resolved = p.resolve()  # Получаем абсолютный путь для корректности
+            # Безопасность: логировать path traversal
+            if not resolved.is_relative_to(base):
+                logging.warning(
+                    f"Подозрительный путь (path traversal): {p} -> {resolved}"
+                )
             if p.is_file():
                 result.append(p)  # type: ignore
             elif p.is_dir():
@@ -282,6 +293,9 @@ def create_rar(archive_path: pathlib.Path, paths: list[pathlib.Path]) -> None:
     Создаёт RAR 5.0 архив в режиме store.
     Принимает путь к архиву и список путей к файлам/директориям.
 
+    Пример:
+        >>> create_rar(pathlib.Path("archive.rar"), [pathlib.Path("file.txt")])
+
     Raises:
         RarCreationError: Если ошибка при создании архива.
         InvalidPathError: Если пути некорректны.
@@ -297,7 +311,7 @@ def create_rar(archive_path: pathlib.Path, paths: list[pathlib.Path]) -> None:
 
             for p in files_and_dirs:
                 try:
-                    rel_name = str(p.relative_to(base))
+                    rel_name = os.path.relpath(str(p), str(base))
                     if p.is_dir():
                         rel_name += "/"
                         writer.write_dir_header(p, rel_name)
@@ -317,24 +331,29 @@ def create_rar(archive_path: pathlib.Path, paths: list[pathlib.Path]) -> None:
         ) from e
 
 
-def parse_command_line_args() -> tuple[pathlib.Path, list[pathlib.Path]]:
-    """Парсит аргументы командной строки и возвращает путь архива и список путей."""
-    if len(sys.argv) < 4:
-        print("Использование: python rar.py a <archive.rar> <file1> [file2] ...")
-        sys.exit(1)
-    if sys.argv[1] != "a":
-        print("Поддерживается только команда 'a' для добавления.")
-        sys.exit(1)
+def parse_command_line_args() -> tuple[pathlib.Path, list[pathlib.Path], bool]:
+    """Парсит аргументы командной строки и возвращает путь архива, список путей и флаг verbose."""
+    import argparse
 
-    archive_path = pathlib.Path(sys.argv[2])
+    parser = argparse.ArgumentParser(description="Простой архиватор RAR 5.0")
+    parser.add_argument("command", choices=["a"], help="Команда: a для добавления")
+    parser.add_argument("archive", help="Путь к архиву")
+    parser.add_argument("files", nargs="+", help="Файлы и директории для архивации")
+    parser.add_argument(
+        "--verbose", action="store_true", help="Выводить прогресс и время"
+    )
+
+    args = parser.parse_args()
+
+    archive_path = pathlib.Path(args.archive)
     paths: list[pathlib.Path] = []
-    for arg in sys.argv[3:]:  # Остальные аргументы - файлы/директории
+    for arg in args.files:
         p = pathlib.Path(arg)
-        if not p.exists():  # Проверка существования
+        if not p.exists():
             print(f"Ошибка: Путь {p} не существует.")
             sys.exit(1)
         paths.append(p)  # type: ignore
-    return archive_path, paths
+    return archive_path, paths, args.verbose
 
 
 def handle_archive_overwrite(archive_path: pathlib.Path) -> None:
@@ -363,12 +382,19 @@ def handle_archive_overwrite(archive_path: pathlib.Path) -> None:
 
 def main() -> None:
     """Основная функция для запуска архиватора из командной строки."""
-    archive_path, paths = parse_command_line_args()
+    archive_path, paths, verbose = parse_command_line_args()
     handle_archive_overwrite(archive_path)
+
+    import time
+
+    start_time = time.time()
 
     try:
         create_rar(archive_path, paths)
+        elapsed = time.time() - start_time
         print(f"Архив {archive_path} создан успешно.")
+        if verbose:
+            print(f"Время выполнения: {elapsed:.2f} секунд.")
     except (InvalidPathError, FileReadError, RarCreationError) as e:
         print(f"Ошибка: {e}")
         sys.exit(1)
