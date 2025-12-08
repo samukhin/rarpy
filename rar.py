@@ -407,7 +407,7 @@ def create_rar(
 ) -> None:
     """
     Создаёт RAR 5.0 архив в режиме store.
-    Принимает путь к архиву, список путей и опциональный пароль для фейкового шифрования.
+    Принимает путь к архиву, список путей и опциональный пароль для шифрования.
 
     Raises:
         RarCreationError: Если ошибка при создании архива.
@@ -458,7 +458,7 @@ def parse_command_line_args() -> tuple[
         "--verbose", action="store_true", help="Выводить прогресс и время"
     )
     parser.add_argument(
-        "--password", help="Пароль для фейкового шифрования (запрос в unrar)"
+        "--password", help="Пароль для шифрования (запрос в unrar)"
     )
 
     args = parser.parse_args()  # type: ignore
