@@ -4,11 +4,8 @@ from __future__ import annotations
 import logging
 import os
 import struct
-import pathlib
-import zlib
-import os
 import sys
-import logging
+import zlib
 from typing import IO
 
 try:
@@ -195,31 +192,7 @@ class RarWriter:
         data_crc = compute_crc32(data)  # CRC для оригинальных данных
         extra_data = b""
         if password:
-            if not CRYPTOGRAPHY_AVAILABLE:
-                raise ImportError("cryptography library required for encryption")
-            extra_data = create_file_encryption_record(password)
-            # Шифруем данные
-            # Парсим record: size vint + type vint + version + flags vint + kdf + salt + iv + check
-            offset = 0
-            # size vint пропускаем
-            while offset < len(extra_data) and (extra_data[offset] & 0x80):
-                offset += 1
-            offset += 1  # size
-            # type vint
-            while offset < len(extra_data) and (extra_data[offset] & 0x80):
-                offset += 1
-            offset += 1  # type
-            offset += 1  # version
-            # flags vint
-            while offset < len(extra_data) and (extra_data[offset] & 0x80):
-                offset += 1
-            offset += 1  # flags
-            offset += 1  # kdf
-            salt = extra_data[offset : offset + 16]
-            iv = extra_data[offset + 16 : offset + 32]
-            key = derive_key(password, salt, 1 << 19)
-            encrypted_data = encrypt_data(data, key, iv)
-            data = encrypted_data  # Только encrypted data
+            data, extra_data = encrypt_file_data(data, password)
         unpacked_size = len(data)  # type: ignore
         packed_size = unpacked_size
         mtime = int(p.stat().st_mtime)  # type: ignore
@@ -340,6 +313,34 @@ def encrypt_data(data: bytes, key: bytes, iv: bytes) -> bytes:
     padded_data = padder.update(data) + padder.finalize()
     encrypted = encryptor.update(padded_data) + encryptor.finalize()
     return encrypted
+
+
+def encrypt_file_data(data: bytes, password: str) -> tuple[bytes, bytes]:
+    """Шифрует данные файла и возвращает (encrypted_data, extra_record)."""
+    extra_data = create_file_encryption_record(password)
+    # Парсим record для salt и iv
+    offset = 0
+    # size vint
+    while offset < len(extra_data) and (extra_data[offset] & 0x80):
+        offset += 1
+    offset += 1
+    # type vint
+    while offset < len(extra_data) and (extra_data[offset] & 0x80):
+        offset += 1
+    offset += 1
+    offset += 1  # version
+    # flags vint
+    while offset < len(extra_data) and (extra_data[offset] & 0x80):
+        offset += 1
+    offset += 1
+    offset += 1  # kdf
+    salt = extra_data[offset : offset + 16]
+    iv = extra_data[offset + 16 : offset + 32]
+    kdf_count = extra_data[offset - 1]  # kdf byte
+    iterations = 1 << kdf_count
+    key = derive_key(password, salt, iterations)
+    encrypted_data = encrypt_data(data, key, iv)
+    return encrypted_data, extra_data
 
 
 def create_file_encryption_record(password: str) -> bytes:
