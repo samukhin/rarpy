@@ -17,6 +17,7 @@
 ## Зависимости
 
 - Python 3.6+ (стандартная библиотека: struct, pathlib, zlib, os, sys, logging)
+- cryptography (для шифрования: `pip install cryptography`)
 
 ## Использование
 
@@ -36,6 +37,7 @@ create_rar(pathlib.Path("archive.rar"), [pathlib.Path("file1.txt"), pathlib.Path
 ### Примеры:
 - Создание архива с файлами: `python rar.py a myarchive.rar file1.txt file2.txt`
 - Добавление папки: `python rar.py a myarchive.rar myfolder/`
+- С шифрованием: `python rar.py a myarchive.rar file.txt --password mypass`
 - С замером времени: `python rar.py a myarchive.rar largefile.dat --verbose`
 
 ## Performance
@@ -67,9 +69,9 @@ create_rar(pathlib.Path("archive.rar"), [pathlib.Path("file1.txt"), pathlib.Path
 ## FAQ
 
 - **Можно ли сжимать файлы?** Нет, только режим store (без сжатия) для юридической безопасности.
-- **Поддерживает ли пароли?** Нет, но можно расширить для будущего шифрования.
-- **Как распаковать архив?** Используйте официальный unrar: `unrar x archive.rar`.
-- **Безопасно ли использовать?** Да, логирует подозрительные пути. Не используйте с непроверенными данными.
+- **Поддерживает ли пароли?** Да, шифрование AES-256 с --password.
+- **Как распаковать архив?** Используйте официальный unrar: `unrar x archive.rar` (запросит пароль если зашифрован).
+- **Безопасно ли использовать?** Да, логирует подозрительные пути. Шифрование защищает данные.
 - **Как добавить unit-тесты?** Создайте `test_rar.py` с pytest для функций вроде `encode_vint`.
 
 ## Security Notes
