@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-import struct
-import pathlib
-import zlib
-import os
-import sys
+# Standard library imports
 import logging
+import os
+import struct
+import sys
+import zlib
 from typing import IO
+
+# Third-party imports (none)
+
+import pathlib
 
 """
 Описание проекта:
@@ -102,7 +106,12 @@ class RarWriter:
         self.file = self.archive_path.open("wb")
         return self
 
-    def __exit__(self, exc_type: type, exc_val: Exception, exc_tb: object) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> None:
         if self.file:
             self.file.close()  # type: ignore
 
