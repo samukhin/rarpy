@@ -352,13 +352,13 @@ def parse_command_line_args() -> tuple[pathlib.Path, list[pathlib.Path], bool]:
         "--verbose", action="store_true", help="Выводить прогресс и время"
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args()  # type: ignore
 
     archive_path = pathlib.Path(args.archive)
     paths: list[pathlib.Path] = []
-    for arg in args.files:
+    for arg in args.files:  # type: ignore  # Остальные аргументы - файлы/директории
         p = pathlib.Path(arg)
-        if not p.exists():
+        if not p.exists():  # Проверка существования
             print(f"Ошибка: Путь {p} не существует.")
             sys.exit(1)
         paths.append(p)  # type: ignore
