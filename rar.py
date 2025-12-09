@@ -526,9 +526,6 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nОперация прервана пользователем.")
         sys.exit(1)
-    except Exception as e:
-        print(f"Неожиданная ошибка: {e}")
-        sys.exit(1)
 
 
 if __name__ == "__main__":
