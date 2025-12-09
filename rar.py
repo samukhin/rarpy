@@ -352,7 +352,7 @@ def create_file_encryption_record(
 ) -> bytes:
     """Создаёт file encryption record для extra area по RAR 5.0."""
     # Check value: первые 8 байт PBKDF2, 4 байта CRC32
-    check_value = key[:8] + struct.pack("<I", compute_crc32(key[:8]))
+    check_value = struct.pack("<I", compute_crc32(key[:8])) + key[:8]
     # Record data: type + version + flags + kdf + salt + iv + check
     record_data = (
         encode_vint(0x01)  # Type
