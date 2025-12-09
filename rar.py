@@ -46,11 +46,20 @@ import os
 import struct
 import sys
 import zlib
-from typing import IO
+from typing import IO, cast
 
 # Third-party imports (none)
-import pathlib
+try:
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
+    cryptography_available = True
+except ImportError:
+    cryptography_available = False
+
+
+import pathlib
 
 # Настройка логирования для обработки ошибок
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
@@ -119,18 +128,18 @@ class RarWriter:
     def write_signature(self) -> None:
         """Записывает сигнатуру RAR 5.0."""
         assert self.file is not None
-        self.file.write(b"Rar!\x1a\x07\x01\x00")  # type: ignore
+        self.file.write(b"Rar!\x1a\x07\x01\x00")
 
     def write_main_header(self) -> None:
         """Записывает главный заголовок архива."""
         assert self.file is not None
         header_data = bytes([1, 0, 0])  # Тип, флаги, флаги архива
-        header_size_vint = encode_vint(len(header_data))  # type: ignore
+        header_size_vint = encode_vint(len(header_data))
         crc_data = header_size_vint + header_data
         header_crc = compute_crc32(crc_data)
-        write_uint32(self.file, header_crc)  # type: ignore
-        self.file.write(header_size_vint)  # type: ignore
-        self.file.write(header_data)  # type: ignore
+        write_uint32(self.file, header_crc)
+        self.file.write(header_size_vint)
+        self.file.write(header_data)
 
     def build_header(
         self,
@@ -143,15 +152,23 @@ class RarWriter:
         mtime: int,  # Время модификации (Unix timestamp)
         crc: int,  # CRC32 данных (0 для директорий)
         compression: int,  # Метод сжатия: 0 - store (без сжатия)
-        host_os: int,  # ОС создания: 0 - Windows
+        host_os: int,  # ОС (1 байт)
         name_len: int,  # Длина имени файла
         name: bytes,  # Имя файла в UTF-8
+        extra_data: bytes = b"",  # Extra area data
     ) -> None:
         """Строит и записывает заголовок файла или директории по RAR 5.0 спецификации."""
+        assert self.file is not None
+        if extra_data:
+            flags |= 0x01  # extra area present
         header_parts = [
             bytes([header_type]),  # Тип заголовка (1 байт)
             bytes([flags]),  # Флаги (1 байт)
         ]
+        if flags & 0x01:  # Extra area present
+            header_parts.append(
+                encode_vint(len(extra_data))
+            )  # Размер extra area (vint)
         if flags & 0x02:  # Data area present
             header_parts.append(encode_vint(data_size))  # Размер данных (vint)
         header_parts.extend(
@@ -167,47 +184,60 @@ class RarWriter:
                 name,  # Имя файла (байты)
             ]
         )
+        if extra_data:
+            header_parts.append(extra_data)  # Extra area
         header_data = b"".join(header_parts)
-        header_size_vint = encode_vint(len(header_data))  # type: ignore
+        header_size_vint = encode_vint(len(header_data))
         crc_data = header_size_vint + header_data
         header_crc = compute_crc32(crc_data)
-        write_uint32(self.file, header_crc)  # type: ignore
-        self.file.write(header_size_vint)  # type: ignore
-        self.file.write(header_data)  # type: ignore
+        write_uint32(self.file, header_crc)
+        self.file.write(header_size_vint)
+        self.file.write(header_data)
 
-    def write_file_header(self, p: pathlib.Path, rel_name: str) -> None:
+    def write_file_header(
+        self, p: pathlib.Path, rel_name: str, password: str | None = None
+    ) -> None:
         """Записывает заголовок файла."""
+        assert self.file is not None
         data = p.read_bytes()  # Читаем байты файла
-        unpacked_size = len(data)  # type: ignore  # Размер оригинального файла
-        packed_size = unpacked_size  # В режиме store packed = unpacked
-        data_crc = compute_crc32(data)  # CRC32 для данных файла
-        mtime = int(p.stat().st_mtime)  # type: ignore  # Время модификации как Unix timestamp
-        name_utf8 = rel_name.encode("utf-8")  # Имя файла в UTF-8 байтах
-        name_len = len(name_utf8)  # type: ignore  # Длина имени
+        original_size = len(data)
+        data_crc = compute_crc32(data)  # CRC для оригинальных данных
+        extra_data = b""
+        if password:
+            data, extra_data = encrypt_file_data(data, password)
+        unpacked_size = len(data)
+        packed_size = unpacked_size
+        mtime = int(p.stat().st_mtime)
+        name_utf8 = rel_name.encode("utf-8")
+        name_len = len(name_utf8)
+
+        file_flags = 0x06  # mtime + CRC
 
         self.build_header(
-            header_type=2,  # File header
-            flags=0x02,  # Флаг: область данных присутствует (data area present)
-            data_size=packed_size,  # Размер packed данных
-            file_flags=0x06,  # Флаги: mtime (0x02) + CRC (0x04)
-            unpacked_size=unpacked_size,
-            attributes=0,  # Нет специальных атрибутов
+            header_type=2,
+            flags=0x02,
+            data_size=packed_size,
+            file_flags=file_flags,
+            unpacked_size=original_size,  # Оригинальный размер
+            attributes=0,
             mtime=mtime,
             crc=data_crc,
-            compression=0,  # Store mode (без сжатия)
-            host_os=0,  # Windows (по умолчанию)
+            compression=0,
+            host_os=0,
             name_len=name_len,
             name=name_utf8,
+            extra_data=extra_data,
         )
-        self.file.write(data)  # type: ignore  # Записываем байты файла после заголовка
+        self.file.write(data)
 
     def write_dir_header(self, p: pathlib.Path, rel_name: str) -> None:
         """Записывает заголовок директории."""
-        mtime = int(p.stat().st_mtime)  # type: ignore  # Время модификации директории
+        assert self.file is not None
+        mtime = int(p.stat().st_mtime)  # Время модификации директории
         name_utf8 = rel_name.encode(
             "utf-8"
         )  # Имя с слэшем для директорий (уже добавлено в create_rar)
-        name_len = len(name_utf8)  # type: ignore
+        name_len = len(name_utf8)
 
         self.build_header(
             header_type=2,  # File header (для директорий тоже)
@@ -226,15 +256,16 @@ class RarWriter:
 
     def write_end_header(self) -> None:
         """Записывает заголовок конца архива."""
+        assert self.file is not None
         header_data = bytes(
             [5, 0, 0]
         )  # Тип: 5 (End of Archive), флаги: 0, флаги конца: 0
-        header_size_vint = encode_vint(len(header_data))  # type: ignore  # Размер заголовка в vint
+        header_size_vint = encode_vint(len(header_data))  # Размер заголовка в vint
         crc_data = header_size_vint + header_data  # Данные для CRC: size + header
         header_crc = compute_crc32(crc_data)  # CRC32 заголовка
-        write_uint32(self.file, header_crc)  # type: ignore  # Записываем CRC (4 байта)
-        self.file.write(header_size_vint)  # type: ignore  # Записываем размер заголовка
-        self.file.write(header_data)  # type: ignore  # Записываем данные заголовка
+        write_uint32(self.file, header_crc)  # Записываем CRC (4 байта)
+        self.file.write(header_size_vint)  # Записываем размер заголовка
+        self.file.write(header_data)  # Записываем данные заголовка
 
 
 def encode_vint(value: int) -> bytes:
@@ -271,6 +302,65 @@ def compute_crc32(data: bytes) -> int:
     return zlib.crc32(data) & 0xFFFFFFFF
 
 
+def derive_key(password: str, salt: bytes, iterations: int = 100000) -> bytes:
+    """Генерирует ключ AES-256 из пароля с PBKDF2."""
+    if not cryptography_available:
+        raise ImportError("cryptography library required for encryption")
+    kdf = PBKDF2HMAC(  # type: ignore
+        algorithm=hashes.SHA256(),  # type: ignore
+        length=32,  # AES-256
+        salt=salt,
+        iterations=iterations,
+    )
+    return kdf.derive(password.encode("utf-8"))  # type: ignore
+
+
+def encrypt_data(data: bytes, key: bytes, iv: bytes) -> bytes:
+    """Шифрует данные AES-256 CBC с PKCS7 padding."""
+    if not cryptography_available:
+        raise ImportError("cryptography library required for encryption")
+    from cryptography.hazmat.primitives import padding
+
+    cipher = Cipher(algorithms.AES(key), modes.CBC(iv))  # type: ignore
+    encryptor = cipher.encryptor()  # type: ignore
+    padder = padding.PKCS7(128).padder()  # type: ignore  # 128 бит = 16 байт
+    padded_data = padder.update(data) + padder.finalize()  # type: ignore
+    encrypted = encryptor.update(padded_data) + encryptor.finalize()  # type: ignore
+    return encrypted
+
+
+def encrypt_file_data(data: bytes, password: str) -> tuple[bytes, bytes]:
+    """Шифрует данные файла и возвращает (encrypted_data, extra_record)."""
+    salt = os.urandom(16)
+    iv = os.urandom(16)
+    kdf_count = 19  # 2^19 = 524288 iterations
+    iterations = 1 << kdf_count
+    key = derive_key(password, salt, iterations)
+    extra_data = create_file_encryption_record(key, salt, iv, kdf_count)
+    encrypted_data = encrypt_data(data, key, iv)
+    return encrypted_data, extra_data
+
+
+def create_file_encryption_record(
+    key: bytes, salt: bytes, iv: bytes, kdf_count: int
+) -> bytes:
+    """Создаёт file encryption record для extra area по RAR 5.0."""
+    # Check value: первые 8 байт PBKDF2, 4 байта CRC32
+    check_value = key[:8] + struct.pack("<I", compute_crc32(key[:8]))
+    # Record data: type + version + flags + kdf + salt + iv + check
+    record_data = (
+        encode_vint(0x01)  # Type
+        + bytes([0])  # Version
+        + encode_vint(0x0001)  # Flags: password check data is present
+        + bytes([kdf_count])  # KDF count
+        + salt
+        + iv
+        + check_value
+    )
+    size = encode_vint(len(record_data))
+    return size + record_data
+
+
 def get_files_and_dirs(paths: list[pathlib.Path]) -> list[pathlib.Path]:
     """
     Собирает список всех файлов и директорий из заданных путей.
@@ -305,13 +395,12 @@ def get_files_and_dirs(paths: list[pathlib.Path]) -> list[pathlib.Path]:
     return sorted(result)
 
 
-def create_rar(archive_path: pathlib.Path, paths: list[pathlib.Path]) -> None:
+def create_rar(
+    archive_path: pathlib.Path, paths: list[pathlib.Path], password: str | None = None
+) -> None:
     """
     Создаёт RAR 5.0 архив в режиме store.
-    Принимает путь к архиву и список путей к файлам/директориям.
-
-    Пример:
-        >>> create_rar(pathlib.Path("archive.rar"), [pathlib.Path("file.txt")])
+    Принимает путь к архиву, список путей и опциональный пароль для шифрования.
 
     Raises:
         RarCreationError: Если ошибка при создании архива.
@@ -333,7 +422,7 @@ def create_rar(archive_path: pathlib.Path, paths: list[pathlib.Path]) -> None:
                         rel_name += "/"
                         writer.write_dir_header(p, rel_name)
                     else:
-                        writer.write_file_header(p, rel_name)
+                        writer.write_file_header(p, rel_name, password)
                 except ValueError as e:
                     logging.warning(f"Пропуск {p}: {e}")
                     continue  # Пропускаем проблемные файлы
@@ -348,29 +437,41 @@ def create_rar(archive_path: pathlib.Path, paths: list[pathlib.Path]) -> None:
         ) from e
 
 
-def parse_command_line_args() -> tuple[pathlib.Path, list[pathlib.Path], bool]:
-    """Парсит аргументы командной строки и возвращает путь архива, список путей и флаг verbose."""
+def parse_command_line_args() -> tuple[
+    pathlib.Path, list[pathlib.Path], bool, str | None
+]:
+    """Парсит аргументы командной строки и возвращает путь архива, список путей, флаг verbose и пароль."""
     import argparse
 
     parser = argparse.ArgumentParser(description="Простой архиватор RAR 5.0")
-    parser.add_argument("command", choices=["a"], help="Команда: a для добавления")
-    parser.add_argument("archive", help="Путь к архиву")
-    parser.add_argument("files", nargs="+", help="Файлы и директории для архивации")
-    parser.add_argument(
+    _ = parser.add_argument("command", choices=["a"], help="Команда: a для добавления")
+    _ = parser.add_argument("archive", help="Путь к архиву")
+    _ = parser.add_argument("files", nargs="+", help="Файлы и директории для архивации")
+    _ = parser.add_argument(
         "--verbose", action="store_true", help="Выводить прогресс и время"
     )
+    _ = parser.add_argument("--password", help="Пароль для шифрования (запрос в unrar)")
 
-    args = parser.parse_args()  # type: ignore
+    args = parser.parse_args()
 
-    archive_path = pathlib.Path(args.archive)
+    archive_path = cast(pathlib.Path, pathlib.Path(args.archive))
+    if args.password and not cryptography_available:
+        print("Ошибка: Для шифрования установите 'pip install cryptography'")
+        _ = sys.exit(1)
+
     paths: list[pathlib.Path] = []
-    for arg in args.files:  # type: ignore  # Остальные аргументы - файлы/директории
+    for arg in cast(list[str], args.files):
         p = pathlib.Path(arg)
-        if not p.exists():  # Проверка существования
+        if not p.exists():
             print(f"Ошибка: Путь {p} не существует.")
-            sys.exit(1)
-        paths.append(p)  # type: ignore
-    return archive_path, paths, args.verbose
+            _ = sys.exit(1)
+        paths.append(p)
+    return (
+        archive_path,
+        paths,
+        cast(bool, args.verbose),
+        cast(str | None, args.password),
+    )
 
 
 def handle_archive_overwrite(archive_path: pathlib.Path) -> None:
@@ -385,21 +486,21 @@ def handle_archive_overwrite(archive_path: pathlib.Path) -> None:
                 )
                 if response != "y":
                     print("Операция отменена.")
-                    sys.exit(0)
+                    _ = sys.exit(0)
             except EOFError:
                 print("Ввод недоступен. Перезапись отменена.")
-                sys.exit(0)
+                _ = sys.exit(0)
     except KeyboardInterrupt:
         print("\nОперация прервана пользователем.")
-        sys.exit(1)
+        _ = sys.exit(1)
     except Exception as e:
         print(f"Неожиданная ошибка при проверке архива: {e}")
-        sys.exit(1)
+        _ = sys.exit(1)
 
 
 def main() -> None:
     """Основная функция для запуска архиватора из командной строки."""
-    archive_path, paths, verbose = parse_command_line_args()
+    archive_path, paths, verbose, password = parse_command_line_args()
     handle_archive_overwrite(archive_path)
 
     import time
@@ -407,20 +508,20 @@ def main() -> None:
     start_time = time.time()
 
     try:
-        create_rar(archive_path, paths)
+        create_rar(archive_path, paths, password)
         elapsed = time.time() - start_time
         print(f"Архив {archive_path} создан успешно.")
         if verbose:
             print(f"Время выполнения: {elapsed:.2f} секунд.")
     except (InvalidPathError, FileReadError, RarCreationError) as e:
         print(f"Ошибка: {e}")
-        sys.exit(1)
-    except KeyboardInterrupt:
-        print("\nОперация прервана пользователем.")
-        sys.exit(1)
+        _ = sys.exit(1)
     except Exception as e:
         print(f"Неожиданная ошибка: {e}")
-        sys.exit(1)
+        _ = sys.exit(1)
+    except KeyboardInterrupt:
+        print("\nОперация прервана пользователем.")
+        _ = sys.exit(1)
 
 
 if __name__ == "__main__":
