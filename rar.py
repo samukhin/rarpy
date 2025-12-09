@@ -105,9 +105,8 @@ class RarWriter:
     Инкапсулирует логику записи заголовков и данных.
     """
 
-    def __init__(self, archive_path: pathlib.Path, base_dir: pathlib.Path) -> None:
+    def __init__(self, archive_path: pathlib.Path) -> None:
         self.archive_path: pathlib.Path = archive_path
-        self.base_dir: pathlib.Path = base_dir
         self.file: IO[bytes] | None = None
 
     def __enter__(self) -> "RarWriter":
@@ -161,19 +160,28 @@ class RarWriter:
         header_parts = [
             bytes([header_type]),  # Тип заголовка (1 байт)
             bytes([flags]),  # Флаги (1 байт)
-            encode_vint(len(extra_data)),  # Размер extra area (vint)
-            encode_vint(data_size),  # Размер данных (vint)
-            bytes([file_flags]),  # Флаги файла (1 байт)
-            encode_vint(unpacked_size),  # Размер распакованный (vint)
-            bytes([attributes]),  # Атрибуты (1 байт)
-            struct.pack("<I", mtime),  # Время модификации (4 байта, little-endian)
-            struct.pack("<I", crc),  # CRC32 (4 байта, little-endian)
-            bytes([compression]),  # Метод сжатия (1 байт)
-            bytes([host_os]),  # ОС (1 байт)
-            encode_vint(name_len),  # Длина имени (vint)
-            name,  # Имя файла (байты)
-            extra_data,  # Extra area
         ]
+        if flags & 0x01:  # Extra area present
+            header_parts.append(
+                encode_vint(len(extra_data))
+            )  # Размер extra area (vint)
+        if flags & 0x02:  # Data area present
+            header_parts.append(encode_vint(data_size))  # Размер данных (vint)
+        header_parts.extend(
+            [
+                bytes([file_flags]),  # Флаги файла (1 байт)
+                encode_vint(unpacked_size),  # Размер распакованный (vint)
+                bytes([attributes]),  # Атрибуты (1 байт)
+                struct.pack("<I", mtime),  # Время модификации (4 байта, little-endian)
+                struct.pack("<I", crc),  # CRC32 (4 байта, little-endian)
+                bytes([compression]),  # Метод сжатия (1 байт)
+                bytes([host_os]),  # ОС (1 байт)
+                encode_vint(name_len),  # Длина имени (vint)
+                name,  # Имя файла (байты)
+            ]
+        )
+        if extra_data:
+            header_parts.append(extra_data)  # Extra area
         header_data = b"".join(header_parts)
         header_size_vint = encode_vint(len(header_data))  # type: ignore
         crc_data = header_size_vint + header_data
@@ -199,8 +207,6 @@ class RarWriter:
         name_len = len(name_utf8)  # type: ignore
 
         file_flags = 0x06  # mtime + CRC
-        if password:
-            file_flags |= 0x04  # encrypted flag
 
         self.build_header(
             header_type=2,
@@ -222,7 +228,9 @@ class RarWriter:
     def write_dir_header(self, p: pathlib.Path, rel_name: str) -> None:
         """Записывает заголовок директории."""
         mtime = int(p.stat().st_mtime)  # type: ignore  # Время модификации директории
-        name_utf8 = (rel_name + "/").encode("utf-8")  # Имя с слэшем для директорий
+        name_utf8 = rel_name.encode(
+            "utf-8"
+        )  # Имя с слэшем для директорий (уже добавлено в create_rar)
         name_len = len(name_utf8)  # type: ignore
 
         self.build_header(
@@ -316,48 +324,27 @@ def encrypt_data(data: bytes, key: bytes, iv: bytes) -> bytes:
 
 def encrypt_file_data(data: bytes, password: str) -> tuple[bytes, bytes]:
     """Шифрует данные файла и возвращает (encrypted_data, extra_record)."""
-    extra_data = create_file_encryption_record(password)
-    # Парсим record для salt и iv
-    offset = 0
-    # size vint
-    while offset < len(extra_data) and (extra_data[offset] & 0x80):
-        offset += 1
-    offset += 1
-    # type vint
-    while offset < len(extra_data) and (extra_data[offset] & 0x80):
-        offset += 1
-    offset += 1
-    offset += 1  # version
-    # flags vint
-    while offset < len(extra_data) and (extra_data[offset] & 0x80):
-        offset += 1
-    offset += 1
-    offset += 1  # kdf
-    salt = extra_data[offset : offset + 16]
-    iv = extra_data[offset + 16 : offset + 32]
-    kdf_count = extra_data[offset - 1]  # kdf byte
+    salt = os.urandom(16)
+    iv = os.urandom(16)
+    kdf_count = 19  # 2^19 = 524288 iterations
     iterations = 1 << kdf_count
     key = derive_key(password, salt, iterations)
+    extra_data = create_file_encryption_record(key, salt, iv, kdf_count)
     encrypted_data = encrypt_data(data, key, iv)
     return encrypted_data, extra_data
 
 
-def create_file_encryption_record(password: str) -> bytes:
+def create_file_encryption_record(
+    key: bytes, salt: bytes, iv: bytes, kdf_count: int
+) -> bytes:
     """Создаёт file encryption record для extra area по RAR 5.0."""
-    if not CRYPTOGRAPHY_AVAILABLE:
-        raise ImportError("cryptography library required for encryption")
-    salt = os.urandom(16)
-    kdf_count = 19  # 2^19 = 524288 iterations
-    iterations = 1 << kdf_count
-    key = derive_key(password, salt, iterations)
-    iv = os.urandom(16)
     # Check value: первые 8 байт PBKDF2, 4 байта CRC32
     check_value = key[:8] + struct.pack("<I", compute_crc32(key[:8]))
     # Record data: type + version + flags + kdf + salt + iv + check
     record_data = (
         encode_vint(0x01)  # Type
         + bytes([0])  # Version
-        + encode_vint(0)  # Flags
+        + encode_vint(0x0001)  # Flags: password check data is present
         + bytes([kdf_count])  # KDF count
         + salt
         + iv
@@ -378,10 +365,10 @@ def get_files_and_dirs(paths: list[pathlib.Path]) -> list[pathlib.Path]:
     for p in paths:
         try:
             resolved = p.resolve()  # Получаем абсолютный путь для корректности
-            # Безопасность: логировать path traversal
+            # Безопасность: запретить path traversal
             if not resolved.is_relative_to(base):
-                logging.warning(
-                    f"Подозрительный путь (path traversal): {p} -> {resolved}"
+                raise InvalidPathError(
+                    p, f"Путь {p} находится вне базовой директории {base}"
                 )
             if p.is_file():
                 result.append(p)  # type: ignore
@@ -398,7 +385,7 @@ def get_files_and_dirs(paths: list[pathlib.Path]) -> list[pathlib.Path]:
         except (OSError, ValueError) as e:
             logging.error(f"Ошибка при обработке пути {p}: {e}")
             raise FileReadError(p, f"Не удалось обработать путь {p}: {e}") from e
-    return result
+    return sorted(result)
 
 
 def create_rar(
@@ -417,13 +404,13 @@ def create_rar(
         files_and_dirs = get_files_and_dirs(paths)
         base = pathlib.Path.cwd()
 
-        with RarWriter(archive_path, base) as writer:
+        with RarWriter(archive_path) as writer:
             writer.write_signature()
             writer.write_main_header()
 
             for p in files_and_dirs:
                 try:
-                    rel_name = os.path.relpath(str(p), str(base))
+                    rel_name = p.resolve().relative_to(base).as_posix()
                     if p.is_dir():
                         rel_name += "/"
                         writer.write_dir_header(p, rel_name)
@@ -456,9 +443,7 @@ def parse_command_line_args() -> tuple[
     parser.add_argument(
         "--verbose", action="store_true", help="Выводить прогресс и время"
     )
-    parser.add_argument(
-        "--password", help="Пароль для шифрования (запрос в unrar)"
-    )
+    parser.add_argument("--password", help="Пароль для шифрования (запрос в unrar)")
 
     args = parser.parse_args()  # type: ignore
 
