@@ -1,8 +1,10 @@
 """
 Описание проекта:
 Простой архиватор RAR 5.0, реализованный на Python 3.x. Поддерживает только режим store (без сжатия),
-что обеспечивает юридическую безопасность, так как не использует патентованные алгоритмы RAR 5 (RangeCoder, специфический LZ-77).
-Архивы совместимы с официальным unrar 5.x и выше. Проект не имеет внешних зависимостей, кроме стандартной библиотеки Python.
+что обеспечивает юридическую безопасность, так как не использует патентованные алгоритмы RAR 5
+(RangeCoder, специфический LZ-77).
+Архивы совместимы с официальным unrar 5.x и выше. Проект не имеет внешних зависимостей,
+кроме стандартной библиотеки Python.
 
 Зависимости:
 - Python 3.10+ (стандартная библиотека: struct, pathlib, zlib, os, sys, logging)
@@ -44,7 +46,7 @@ import os
 import struct
 import sys
 import zlib
-from typing import IO, TYPE_CHECKING, cast
+from typing import IO, cast
 
 # Third-party imports (none)
 try:
@@ -56,14 +58,6 @@ try:
 except ImportError:
     cryptography_available = False
 
-if TYPE_CHECKING:
-    from cryptography.hazmat.primitives import hashes as _hashes, ciphers as _ciphers
-    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC as _PBKDF2HMAC
-    from cryptography.hazmat.primitives.ciphers import (
-        Cipher as _Cipher,
-        algorithms as _algorithms,
-        modes as _modes,
-    )
 
 import pathlib
 
