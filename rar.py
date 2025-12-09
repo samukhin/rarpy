@@ -1,17 +1,3 @@
-from __future__ import annotations
-
-# Standard library imports
-import logging
-import os
-import struct
-import sys
-import zlib
-from typing import IO
-
-# Third-party imports (none)
-
-import pathlib
-
 """
 Описание проекта:
 Простой архиватор RAR 5.0, реализованный на Python 3.x. Поддерживает только режим store (без сжатия),
@@ -49,6 +35,20 @@ MIT License. Проект распространяется свободно, б�
 - Логирование ошибок в stderr с уровнями ERROR и WARNING.
 - Валидация путей и размеров файлов.
 """
+
+from __future__ import annotations
+
+# Standard library imports
+import logging
+import os
+import struct
+import sys
+import zlib
+from typing import IO
+
+# Third-party imports (none)
+import pathlib
+
 
 # Настройка логирования для обработки ошибок
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
