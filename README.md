@@ -16,7 +16,7 @@
 
 ## Зависимости
 
-- Python 3.6+ (стандартная библиотека: struct, pathlib, zlib, os, sys, logging)
+- Python 3.10+ (стандартная библиотека: struct, pathlib, zlib, os, sys, logging)
 - cryptography (для шифрования: `pip install cryptography`)
 
 ## Использование
