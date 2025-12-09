@@ -97,9 +97,8 @@ class RarWriter:
     Инкапсулирует логику записи заголовков и данных.
     """
 
-    def __init__(self, archive_path: pathlib.Path, base_dir: pathlib.Path) -> None:
+    def __init__(self, archive_path: pathlib.Path) -> None:
         self.archive_path: pathlib.Path = archive_path
-        self.base_dir: pathlib.Path = base_dir
         self.file: IO[bytes] | None = None
 
     def __enter__(self) -> "RarWriter":
@@ -150,17 +149,22 @@ class RarWriter:
         header_parts = [
             bytes([header_type]),  # Тип заголовка (1 байт)
             bytes([flags]),  # Флаги (1 байт)
-            encode_vint(data_size),  # Размер данных (vint)
-            bytes([file_flags]),  # Флаги файла (1 байт)
-            encode_vint(unpacked_size),  # Размер распакованный (vint)
-            bytes([attributes]),  # Атрибуты (1 байт)
-            struct.pack("<I", mtime),  # Время модификации (4 байта, little-endian)
-            struct.pack("<I", crc),  # CRC32 (4 байта, little-endian)
-            bytes([compression]),  # Метод сжатия (1 байт)
-            bytes([host_os]),  # ОС (1 байт)
-            encode_vint(name_len),  # Длина имени (vint)
-            name,  # Имя файла (байты)
         ]
+        if flags & 0x02:  # Data area present
+            header_parts.append(encode_vint(data_size))  # Размер данных (vint)
+        header_parts.extend(
+            [
+                bytes([file_flags]),  # Флаги файла (1 байт)
+                encode_vint(unpacked_size),  # Размер распакованный (vint)
+                bytes([attributes]),  # Атрибуты (1 байт)
+                struct.pack("<I", mtime),  # Время модификации (4 байта, little-endian)
+                struct.pack("<I", crc),  # CRC32 (4 байта, little-endian)
+                bytes([compression]),  # Метод сжатия (1 байт)
+                bytes([host_os]),  # ОС (1 байт)
+                encode_vint(name_len),  # Длина имени (vint)
+                name,  # Имя файла (байты)
+            ]
+        )
         header_data = b"".join(header_parts)
         header_size_vint = encode_vint(len(header_data))  # type: ignore
         crc_data = header_size_vint + header_data
@@ -198,7 +202,9 @@ class RarWriter:
     def write_dir_header(self, p: pathlib.Path, rel_name: str) -> None:
         """Записывает заголовок директории."""
         mtime = int(p.stat().st_mtime)  # type: ignore  # Время модификации директории
-        name_utf8 = (rel_name + "/").encode("utf-8")  # Имя с слэшем для директорий
+        name_utf8 = rel_name.encode(
+            "utf-8"
+        )  # Имя с слэшем для директорий (уже добавлено в create_rar)
         name_len = len(name_utf8)  # type: ignore
 
         self.build_header(
@@ -274,10 +280,10 @@ def get_files_and_dirs(paths: list[pathlib.Path]) -> list[pathlib.Path]:
     for p in paths:
         try:
             resolved = p.resolve()  # Получаем абсолютный путь для корректности
-            # Безопасность: логировать path traversal
+            # Безопасность: запретить path traversal
             if not resolved.is_relative_to(base):
-                logging.warning(
-                    f"Подозрительный путь (path traversal): {p} -> {resolved}"
+                raise InvalidPathError(
+                    p, f"Путь {p} находится вне базовой директории {base}"
                 )
             if p.is_file():
                 result.append(p)  # type: ignore
@@ -294,7 +300,7 @@ def get_files_and_dirs(paths: list[pathlib.Path]) -> list[pathlib.Path]:
         except (OSError, ValueError) as e:
             logging.error(f"Ошибка при обработке пути {p}: {e}")
             raise FileReadError(p, f"Не удалось обработать путь {p}: {e}") from e
-    return result
+    return sorted(result)
 
 
 def create_rar(archive_path: pathlib.Path, paths: list[pathlib.Path]) -> None:
@@ -314,13 +320,13 @@ def create_rar(archive_path: pathlib.Path, paths: list[pathlib.Path]) -> None:
         files_and_dirs = get_files_and_dirs(paths)
         base = pathlib.Path.cwd()
 
-        with RarWriter(archive_path, base) as writer:
+        with RarWriter(archive_path) as writer:
             writer.write_signature()
             writer.write_main_header()
 
             for p in files_and_dirs:
                 try:
-                    rel_name = os.path.relpath(str(p), str(base))
+                    rel_name = p.resolve().relative_to(base).as_posix()
                     if p.is_dir():
                         rel_name += "/"
                         writer.write_dir_header(p, rel_name)
